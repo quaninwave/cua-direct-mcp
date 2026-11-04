@@ -29,11 +29,15 @@ PAGE = """<!doctype html><meta charset=utf-8><title>cua-direct tools test</title
 <button id=btn onclick="document.getElementById('out').textContent='clicked:'+(window.__n=(window.__n||0)+1)">Click me</button>
 <button id=alertbtn onclick="setTimeout(()=>alert('hello alert'),300)">Alert</button>
 <button id=confirmbtn onclick="setTimeout(()=>{document.getElementById('out').textContent='confirm:'+confirm('sure?')},300)">Confirm</button>
+<button id=syncprompt onclick="document.getElementById('out').textContent='prompt:'+prompt('name?')">Ask name</button>
+<button id=syncalert onclick="alert('sync alert');document.getElementById('out').textContent='sync-alert-closed'">Show alert</button>
 <div id=out>-</div>
 <a id=dl href="/file.txt" download>Download</a>
 <input type=file id=up onchange="document.getElementById('out').textContent='file:'+this.files[0].name">
 <img id=img src="/pic.svg" width=40 height=40>
 <iframe id=fr src="/frame.html" width=300 height=60></iframe>
+<table id=tb><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>
+<ul id=list><li class=it><b>one</b> <a href="/a1">first</a></li><li class=it><b>two</b> <a href="/a2">second</a></li></ul>
 <div style="height:2500px">tall</div>
 <script>console.log('hello-log'); console.warn('warn-log'); console.error('error-log');</script>
 </body>"""
@@ -235,7 +239,8 @@ async def main(only: set[str]) -> int:
                 return g.get("open") and g.get("type") == "alert" and not h.is_error and g2.get("open") is False, (g, text_of(h)[:80], g2)
 
             async def s_confirm():
-                await call("page_click", target={"selector": "#confirmbtn"})
+                # the button text matches the risky-control guard, so the test confirms it explicitly
+                await call("page_click", target={"selector": "#confirmbtn"}, confirmed=True)
                 await asyncio.sleep(0.8)
                 g = jload(await call("dialog_get"))
                 await call("dialog_handle", action="accept")
@@ -243,16 +248,30 @@ async def main(only: set[str]) -> int:
                 v = text_of(await call("page_read", target={"selector": "#out"}))
                 return g.get("type") == "confirm" and v == "confirm:true", (g, v)
 
+            async def s_sync_dialogs():
+                # onclick calls prompt()/alert() synchronously: a locator click must not wedge the tab
+                c1 = await call("page_click", target={"selector": "#syncprompt"}, timeout_ms=5000)
+                g = jload(await call("dialog_get"))
+                h = await call("dialog_handle", action="accept", prompt_text="probe-answer")
+                v = text_of(await call("page_read", target={"selector": "#out"}))
+                await call("page_click", target={"selector": "#syncalert"}, timeout_ms=5000)
+                h2 = await call("dialog_handle", action="dismiss")
+                v2 = text_of(await call("page_read", target={"selector": "#out"}))
+                ok = (not c1.is_error and jload(c1).get("dialog") == "prompt" and g.get("type") == "prompt" and not h.is_error
+                      and v == "prompt:probe-answer" and not h2.is_error and v2 == "sync-alert-closed")
+                return ok, (text_of(c1)[:90], g.get("type"), v, v2)
+
             async def s_download():
+                # scratch=True: cleanup removes it from Downloads, so reruns do not get "cua-test (1).txt"
                 dest = tmp / "dl"
                 dest.mkdir()
-                r = await call("file_download", target={"selector": "#dl"}, method="click", copy_to=str(dest))
-                d = jload(type("R", (), {"content": r.content[:1]}))
-                ok = (not r.is_error) and (dest / "cua-test.txt").exists()
-                return ok, text_of(r)[:200]
+                r = await call("file_download", target={"selector": "#dl"}, method="click", copy_to=str(dest), scratch=True)
+                got = [p.name for p in dest.iterdir()]
+                ok = (not r.is_error) and any(n.startswith("cua-test") and n.endswith(".txt") for n in got)
+                return ok, (text_of(r)[:160], got)
 
             async def s_upload():
-                r = await call("file_upload", files=[str(upfile)], target={"selector": "#up"})
+                r = await call("file_upload", files=[str(upfile)], target={"selector": "#up"}, confirmed=True)
                 v = text_of(await call("page_read", target={"selector": "#out"}))
                 return (not r.is_error) and v == "file:upload-me.txt", (text_of(r)[:150], v)
 
@@ -325,28 +344,82 @@ async def main(only: set[str]) -> int:
 
             async def s_history():
                 # narrow no-match query: exercises the path without reading real history
-                r = await call("browser_history", queries=["zzzz-cua-no-such-term-zzzz"], limit=1)
+                r = await call("browser_history", queries=["zzzz-cua-no-such-term-zzzz"], limit=1, confirmed=True)
                 d = jload(r)
                 return (not r.is_error) and d["count"] == 0, text_of(r)[:200]
 
             async def s_close():
-                r = jload(await call("tab_close", tab_id=tab["id"]))
+                # tab_mark(handoff) took the tab off the cleanup list, so closing it needs confirmed=True
+                r = jload(await call("tab_close", tab_id=tab["id"], confirmed=True))
                 return r.get("closed") == tab["id"], r
 
             async def s_js():
                 r = await call("js", code="nodeRepl.write('raw-ok')", title="raw js")
                 return "raw-ok" in text_of(r), text_of(r)[-60:]
 
+            async def s_gate():
+                r = await call("page_click", target={"selector": "#confirmbtn"})
+                # no confirmed: refused before any bookmark lookup, so the id never has to exist
+                b = await call("bookmark_remove", id="0")
+                return (r.is_error and "needs confirmation" in text_of(r) and b.is_error
+                        and "needs confirmation" in text_of(b)), (text_of(r)[:100], text_of(b)[:100])
+
+            async def s_hint():
+                # confirmed=True skips the guard's element lookup so the click fails fast on timeout_ms
+                r = await call("page_click", target={"role": "button", "name": "Clik me"}, timeout_ms=1500, confirmed=True)
+                return r.is_error and "closest elements" in text_of(r) and "target=" in text_of(r), text_of(r)[-200:]
+
+            async def s_look():
+                d = jload(await call("look"))
+                targets = [b.get("target") for b in d["buttons"]]
+                return d["title"] == "cua-direct tools test" and {"selector": "#btn"} in targets, (len(d["inputs"]), targets[:3])
+
+            async def s_links():
+                d = jload(await call("links", filter="file"))
+                return d["count"] >= 1 and d["links"][0]["href"].endswith("/file.txt"), d
+
+            async def s_table():
+                d = jload(await call("table", selector="#tb"))
+                return d["rows"] == [["A", "B"], ["1", "2"]], d
+
+            async def s_items():
+                d = jload(await call("items", container="#list .it", fields={"name": "b", "href": "a@href"}))
+                w = jload(await call("items", container="#list .it", fields={"name": "b", "nope": ".no-such"}))
+                return (d["count"] == 2 and d["rows"][0] == {"name": "one", "href": "/a1"} and "warning" not in d
+                        and "nope" in w.get("warning", "") and "name" not in w["warning"]), (d, w.get("warning"))
+
+            async def s_fill():
+                d = jload(await call("fill_form", data={"Name": "Ada", "I agree": True}))
+                v = text_of(await call("page_read", target={"selector": "#name"}, what="value"))
+                return all(x["ok"] for x in d["results"]) and v == "Ada", (d, v)
+
+            async def s_snapshot():
+                a = jload(await call("snapshot", action="save", name="cua-tools-test", selector="#h"))
+                b = jload(await call("snapshot", action="diff", name="cua-tools-test", selector="#h"))
+                return "saved" in a and b["changed"] is False, (a, b)
+
+            async def s_scroll_load():
+                d = jload(await call("scroll_load", item="#list .it", rounds=3, wait_ms=300))
+                return d["final"] == 2, d
+
+            async def s_cleanup():
+                d = jload(await call("cleanup"))
+                return d is not None and not d.get("failed"), d
+
             for name, fn in [
                 ("browsers", s_browsers), ("open", s_open), ("list", s_list), ("select", s_select),
                 ("ax", s_ax), ("dom", s_dom), ("read", s_read), ("find", s_find), ("evaluate", s_evaluate),
                 ("type", s_type), ("type_native", s_type_native), ("click", s_click), ("click_index", s_click_index),
                 ("check", s_check), ("select_opt", s_select_opt), ("key", s_key), ("frame", s_frame),
+                ("gate", s_gate), ("hint", s_hint), ("look", s_look), ("links", s_links), ("table", s_table),
+                ("items", s_items), ("fill_form", s_fill), ("snapshot", s_snapshot), ("scroll_load", s_scroll_load),
                 ("scroll", s_scroll), ("wait", s_wait), ("shot", s_shot), ("clipboard", s_clip),
-                ("dialog", s_dialog), ("confirm", s_confirm), ("download", s_download), ("upload", s_upload),
+                ("dialog", s_dialog), ("confirm", s_confirm), ("sync_dialogs", s_sync_dialogs),
+                ("download", s_download), ("upload", s_upload),
                 ("logs", s_logs), ("assets", s_assets), ("viewport", s_viewport), ("cdp", s_cdp),
                 ("nav", s_nav), ("session", s_session), ("mgmt_read", s_mgmt_read), ("group", s_group),
                 ("sort_move", s_sort_move), ("history", s_history), ("js", s_js), ("close", s_close),
+                ("cleanup", s_cleanup),
             ]:
                 await step(name, fn)
 

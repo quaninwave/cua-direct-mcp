@@ -6,7 +6,8 @@ ROOT = Path(__file__).resolve().parent.parent
 FILES = [
     "README.md", "CHANGELOG.md", "VERSION", "requirements.txt", "install.ps1",
     "mcp-config.example.json",
-    "scripts/cua_direct_proxy.py", "scripts/cua_direct_tools.py", "scripts/register_claude.py",
+    "scripts/cua_direct_proxy.py", "scripts/cua_direct_tools.py", "scripts/cua_core.py",
+    "scripts/extract_meta_cards.js", "scripts/register_claude.py",
     "scripts/relabel_group.py", "scripts/smoke_test.py", "scripts/tools_test.py",
     "scripts/build_package.py",
 ]
