@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cua_direct": {
+      "command": "<INSTALL_DIR>\.venv\Scripts\python.exe",
+      "args": ["<INSTALL_DIR>\scripts\cua_direct_tools.py"]
+    }
+  }
+}
